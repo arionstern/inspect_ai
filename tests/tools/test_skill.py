@@ -18,7 +18,11 @@ from inspect_ai.solver import Generate, Solver, TaskState, fork, solver
 from inspect_ai.tool import Tool, ToolError, bash, skill
 from inspect_ai.tool._tool_def import ToolDef
 from inspect_ai.tool._tools._skill.install import install_lock, install_skills
-from inspect_ai.tool._tools._skill.read import SkillParsingError, _read_skill
+from inspect_ai.tool._tools._skill.read import (
+    SkillParsingError,
+    _read_skill,
+    read_skills,
+)
 from inspect_ai.tool._tools._skill.tool import _cache_lock
 from inspect_ai.tool._tools._skill.types import Skill
 from inspect_ai.util import (
@@ -310,6 +314,38 @@ metadata:
 
         assert len(result.assets) == 1
         assert "templates/email/welcome.txt" in result.assets
+
+    def test_read_skills_preserves_deeply_nested_posix_paths(
+        self, tmp_path: Path
+    ) -> None:
+        """Test that deeply nested file names use POSIX separators."""
+        skill_dir = tmp_path / "test-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(create_skill_md())
+
+        reference = skill_dir / "references" / "api" / "v1" / "guides" / "api.md"
+        reference.parent.mkdir(parents=True)
+        reference.write_text("API reference")
+
+        result = read_skills([skill_dir])[0]
+
+        assert "api/v1/guides/api.md" in result.references
+
+    def test_hidden_directory_inside_subdirectory_is_excluded(
+        self, tmp_path: Path
+    ) -> None:
+        """Test that files under hidden nested directories are excluded."""
+        skill_dir = tmp_path / "test-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(create_skill_md())
+
+        hidden_file = skill_dir / "scripts" / "tools" / ".hidden" / "secret.py"
+        hidden_file.parent.mkdir(parents=True)
+        hidden_file.write_text("secret")
+
+        result = read_skills([skill_dir])[0]
+
+        assert all(".hidden" not in name for name in result.scripts)
 
     def test_subdirectories_excludes_hidden_in_path(self, tmp_path: Path) -> None:
         """Test that files in hidden directories are excluded."""
@@ -776,6 +812,68 @@ class TestSkillToolStateScope:
     def sandbox(self) -> _FileSandbox:
         """A sandbox that keeps written files in memory."""
         return _FileSandbox()
+
+    async def test_read_skills_nested_files_install_at_posix_paths_issue_5786(
+        self, tmp_path: Path, sandbox: _FileSandbox
+    ) -> None:
+        """Test that nested skill files retain POSIX paths when installed."""
+        skill_dir = tmp_path / "example"
+        (skill_dir / "scripts" / "bash").mkdir(parents=True)
+        (skill_dir / "references" / "docs").mkdir(parents=True)
+        (skill_dir / "assets" / "img").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            create_skill_md(name="example", body="Read the bundled files.")
+        )
+        (skill_dir / "scripts" / "bash" / "run.sh").write_text("echo hi")
+        (skill_dir / "references" / "docs" / "api.md").write_text("API docs")
+        (skill_dir / "assets" / "img" / "logo.txt").write_text("logo")
+
+        resolved = read_skills([skill_dir])
+        await install_skills(resolved, sandbox=sandbox, dir="/work/skills")
+
+        assert set(resolved[0].scripts) == {"bash/run.sh"}
+        assert set(resolved[0].references) == {"docs/api.md"}
+        assert set(resolved[0].assets) == {"img/logo.txt"}
+        assert sandbox.files["/work/skills/example/scripts/bash/run.sh"] == b"echo hi"
+        assert (
+            sandbox.files["/work/skills/example/references/docs/api.md"] == b"API docs"
+        )
+        assert sandbox.files["/work/skills/example/assets/img/logo.txt"] == b"logo"
+
+    async def test_install_rejects_backslash_file_names(
+        self, sandbox: _FileSandbox
+    ) -> None:
+        """Test that install_skills rejects Windows-style file names."""
+        skill_with_backslash = Skill(
+            name="example",
+            description="Example.",
+            instructions="Do it.",
+            scripts={"bash\\run.sh": "echo hi"},
+        )
+
+        with pytest.raises(ValueError, match="use '/' as the path separator"):
+            await install_skills(
+                [skill_with_backslash], sandbox=sandbox, dir="/work/skills"
+            )
+
+        assert sandbox.written == []
+
+    async def test_install_accepts_posix_nested_file_names(
+        self, sandbox: _FileSandbox
+    ) -> None:
+        """Test that install_skills accepts POSIX-style nested file names."""
+        skill_with_posix_path = Skill(
+            name="example",
+            description="Example.",
+            instructions="Do it.",
+            scripts={"bash/run.sh": "echo hi"},
+        )
+
+        await install_skills(
+            [skill_with_posix_path], sandbox=sandbox, dir="/work/skills"
+        )
+
+        assert sandbox.files["/work/skills/example/scripts/bash/run.sh"] == b"echo hi"
 
     async def test_default_skill_tool_is_per_scope(self, sandbox: _FileSandbox) -> None:
         _use_sandbox(sandbox)
