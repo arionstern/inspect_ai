@@ -35,12 +35,17 @@ async def install_skills(
 
     Returns:
         List of `SkillInfo` with skill names, descriptions, and locations.
+
+    Raises:
+        ValueError: If a skill's supporting file names are invalid.
     """
     # resolve and validate skills before sandbox setup
     from .validate import check_unique_skill_names
 
     resolved_skills = read_skills(skills)
     check_unique_skill_names(resolved_skills)
+    for skill in resolved_skills:
+        _check_file_names(skill)
 
     # resolve sandbox
     sbox = sandbox if isinstance(sandbox, SandboxEnvironment) else sandbox_env(sandbox)
@@ -115,8 +120,9 @@ def _check_file_names(skill: Skill) -> None:
 
     Names are installed at their normalized path (`./run.sh` at `run.sh`,
     `a//b` at `a/b`). Names that are empty, absolute or contain `..` would
-    leave their directory, and two names in one map with the same normalized
-    path would write one file twice, so both are refused.
+    leave their directory; backslash names are also refused because sandbox
+    paths use `/`. Two names in one map with the same normalized path would
+    write one file twice, so both are refused.
     """
     for subdir, contents in (
         ("scripts", skill.scripts),
@@ -126,6 +132,11 @@ def _check_file_names(skill: Skill) -> None:
         seen: dict[PurePosixPath, str] = {}
         for name in contents:
             path = PurePosixPath(name)
+            if "\\" in name:
+                raise ValueError(
+                    f"Skill '{skill.name}' has an invalid {subdir} file name "
+                    f"'{name}': use '/' as the path separator, not '\\'."
+                )
             if not path.parts or path.is_absolute() or ".." in path.parts:
                 raise ValueError(
                     f"Skill '{skill.name}' has an invalid {subdir} file name "
